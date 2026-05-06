@@ -1,0 +1,850 @@
+package com.ariaagent.mobile.ui.screens
+
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontFamily
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.ariaagent.mobile.ui.viewmodel.AgentViewModel
+import com.ariaagent.mobile.ui.viewmodel.SessionStatsUiState
+import com.ariaagent.mobile.ui.viewmodel.SuggestionBannerItem
+import com.ariaagent.mobile.ui.theme.ARIAColors
+import com.ariaagent.mobile.core.system.NetworkMonitor
+
+/**
+ * DashboardScreen — at-a-glance status panel.
+ *
+ * Shows:
+ *  • Agent status pill (IDLE / RUNNING / PAUSED / DONE / ERROR)
+ *  • Current task & target app
+ *  • Step count + token rate
+ *  • Thermal level banners (severe / critical)
+ *  • Live step activity bar (observe → reason → act → store)
+ *  • Live LLM token stream
+ *  • Last LoRA + policy learning stats
+ *  • [Phase 15] Chained task notification banner (dismissible)
+ *  • [Phase 6/8] Game loop metrics card (when in game mode)
+ *
+ * Phase 11 — pure Compose. Phase 15 update: chained task + game loop.
+ */
+@Composable
+fun DashboardScreen(vm: AgentViewModel = viewModel()) {
+    val agentState         by vm.agentState.collectAsStateWithLifecycle()
+    val thermalState       by vm.thermalState.collectAsStateWithLifecycle()
+    val stepState          by vm.stepState.collectAsStateWithLifecycle()
+    val learningState      by vm.learningState.collectAsStateWithLifecycle()
+    val streamBuffer       by vm.streamBuffer.collectAsStateWithLifecycle()
+    val chainedTask        by vm.chainedTask.collectAsStateWithLifecycle()
+    val gameLoopState      by vm.gameLoopState.collectAsStateWithLifecycle()
+    val pendingSuggestions by vm.pendingSuggestions.collectAsStateWithLifecycle()
+    val hwStats            by vm.hardwareStats.collectAsStateWithLifecycle()
+    val sessionStats           by vm.sessionStats.collectAsStateWithLifecycle()
+    val lastTaskDurationMs     by vm.lastTaskDurationMs.collectAsStateWithLifecycle()
+    val networkType        by vm.networkType.collectAsStateWithLifecycle()
+    val uptimeSeconds      by vm.uptimeSeconds.collectAsStateWithLifecycle()
+    // Round 23 §183: collect taskQueue so we can show pending count chip.
+    val taskQueue          by vm.taskQueue.collectAsStateWithLifecycle()
+
+    LaunchedEffect(Unit) { vm.refreshPendingSuggestions() }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(ARIAColors.Background)
+            .verticalScroll(rememberScrollState())
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // ── Header ────────────────────────────────────────────────────────────
+        Text(
+            "ARIA AGENT",
+            style = MaterialTheme.typography.headlineMedium.copy(
+                color = ARIAColors.Primary,
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 4.sp
+            )
+        )
+
+        // ── T005: Proactive Goal Surfacing — suggestion banner ────────────────────
+        val topSuggestion = pendingSuggestions.firstOrNull()
+        if (topSuggestion != null) {
+            SuggestionBanner(
+                suggestion = topSuggestion,
+                onAccept   = { vm.acceptSuggestion(topSuggestion) },
+                onDismiss  = { vm.dismissSuggestion(topSuggestion.id) }
+            )
+        }
+
+        // ── Phase 15: Chained task notification banner ─────────────────────────
+        chainedTask?.let { chain ->
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(10.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = ARIAColors.Accent.copy(alpha = 0.12f)
+                ),
+                elevation = CardDefaults.cardElevation(0.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        Icons.Default.PlaylistPlay,
+                        contentDescription = null,
+                        tint = ARIAColors.Accent,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            "TASK CHAINED",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = ARIAColors.Accent,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                        )
+                        Text(
+                            chain.goal,
+                            style = MaterialTheme.typography.bodySmall.copy(color = ARIAColors.OnSurface),
+                            maxLines = 2
+                        )
+                        if (chain.queueSize > 0) {
+                            Text(
+                                "${chain.queueSize} task${if (chain.queueSize == 1) "" else "s"} remaining",
+                                style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted)
+                            )
+                        }
+                    }
+                    IconButton(
+                        onClick = { vm.dismissChainNotification() },
+                        modifier = Modifier.size(28.dp)
+                    ) {
+                        Icon(
+                            Icons.Default.Close,
+                            contentDescription = "Dismiss",
+                            tint = ARIAColors.Muted,
+                            modifier = Modifier.size(16.dp)
+                        )
+                    }
+                }
+            }
+        }
+
+        // ── Thermal banners ───────────────────────────────────────────────────
+        if (thermalState.level == "severe") {
+            ThermalBanner(
+                "Cooling down — agent throttled",
+                ARIAColors.Error,
+                Icons.Default.Thermostat
+            )
+        }
+        if (thermalState.level == "critical") {
+            ThermalBanner(
+                "Device critical — inference suspended",
+                Color(0xFFDC2626),
+                Icons.Default.Warning
+            )
+        }
+
+        // ── Status card ───────────────────────────────────────────────────────
+        ARIACard {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    StatusPill(status = agentState.status)
+                    if (agentState.currentTask.isNotBlank()) {
+                        Spacer(Modifier.height(6.dp))
+                        Text(
+                            agentState.currentTask,
+                            style = MaterialTheme.typography.bodyMedium.copy(color = ARIAColors.OnSurface),
+                            maxLines = 2
+                        )
+                    }
+                    if (agentState.currentApp.isNotBlank()) {
+                        Text(
+                            "▸ ${agentState.currentApp}",
+                            style = MaterialTheme.typography.bodySmall.copy(color = ARIAColors.Muted)
+                        )
+                    }
+                }
+                Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    MetricChip(Icons.Default.Speed, "${String.format("%.1f", agentState.tokenRate)} t/s")
+                    MetricChip(Icons.Default.Loop, "Step ${agentState.stepCount}")
+                    // Round 14 §76: live task uptime while running.
+                    if (agentState.status == "running") {
+                        val m = uptimeSeconds / 60
+                        val s = uptimeSeconds % 60
+                        MetricChip(Icons.Default.Timer, "$m:${"%02d".format(s)}")
+                    }
+                }
+            }
+
+            if (agentState.status == "running") {
+                // Round 17 §107: last LLM action preview while agent is running.
+                if (agentState.lastAction.isNotBlank()) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "↳ ${agentState.lastAction.take(60)}",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color      = ARIAColors.Muted,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize   = 9.sp,
+                        ),
+                        maxLines = 1,
+                    )
+                }
+                Spacer(Modifier.height(12.dp))
+                StepActivityBar(activity = stepState.activity, stepNumber = stepState.stepNumber)
+            }
+
+            // Round 20 §141: "Last task" preview line when agent is idle.
+            if (agentState.status == "idle" && agentState.lastCompletedGoal.isNotBlank()) {
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    "Last: ${agentState.lastCompletedGoal.take(55)}",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color      = ARIAColors.Muted,
+                        fontFamily = FontFamily.Monospace,
+                        fontSize   = 9.sp,
+                    ),
+                )
+            }
+
+            // Round 15 §85: quick-action strip shown only on error — retry or dismiss.
+            if (agentState.status == "error") {
+                Spacer(Modifier.height(10.dp))
+                if (agentState.lastError.isNotBlank()) {
+                    Text(
+                        agentState.lastError,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = ARIAColors.Error,
+                            fontFamily = FontFamily.Monospace,
+                            fontSize   = 9.sp
+                        ),
+                        modifier = Modifier.padding(bottom = 2.dp)
+                    )
+                }
+                // Round 17 §115: show timestamp when last error occurred.
+                if (agentState.lastErrorAt > 0L) {
+                    Text(
+                        "at ${java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(java.util.Date(agentState.lastErrorAt))}",
+                        style    = MaterialTheme.typography.labelSmall.copy(
+                            color    = ARIAColors.Muted,
+                            fontSize = 9.sp,
+                        ),
+                        modifier = Modifier.padding(bottom = 6.dp),
+                    )
+                }
+                Row(
+                    modifier              = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    if (agentState.currentTask.isNotBlank()) {
+                        Button(
+                            onClick  = { vm.startAgent(agentState.currentTask, agentState.currentApp) },
+                            modifier = Modifier.weight(1f),
+                            colors   = ButtonDefaults.buttonColors(containerColor = ARIAColors.Primary),
+                            shape    = RoundedCornerShape(10.dp),
+                            contentPadding = PaddingValues(vertical = 8.dp)
+                        ) {
+                            Icon(Icons.Default.Replay, null, modifier = Modifier.size(14.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Retry Task", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                        }
+                    }
+                    OutlinedButton(
+                        onClick  = { vm.clearError() },
+                        modifier = if (agentState.currentTask.isNotBlank()) Modifier.weight(1f)
+                                   else Modifier.fillMaxWidth(),
+                        shape    = RoundedCornerShape(10.dp),
+                        colors   = OutlinedButtonDefaults.colors(contentColor = ARIAColors.Muted),
+                        border   = androidx.compose.foundation.BorderStroke(1.dp, ARIAColors.Divider),
+                        contentPadding = PaddingValues(vertical = 8.dp)
+                    ) {
+                        Icon(Icons.Default.Close, null, modifier = Modifier.size(14.dp))
+                        Spacer(Modifier.width(4.dp))
+                        Text("Dismiss", fontWeight = FontWeight.SemiBold, fontSize = 12.sp)
+                    }
+                }
+            }
+        }
+
+        // ── Hardware meters ───────────────────────────────────────────────────
+        ARIACard {
+            HardwareMeterRow(stats = hwStats)
+            Spacer(Modifier.height(8.dp))
+            // Round 13: network connectivity chip
+            val (netLabel, netColor) = when (networkType) {
+                "wifi"   -> "NET  WiFi"  to ARIAColors.Success
+                "mobile" -> "NET  Mobile" to ARIAColors.Warning
+                else     -> "OFFLINE"    to ARIAColors.Error
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.End
+            ) {
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(4.dp))
+                        .background(netColor.copy(alpha = 0.15f))
+                        .padding(horizontal = 8.dp, vertical = 3.dp)
+                ) {
+                    Text(
+                        netLabel,
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color      = netColor,
+                            fontSize   = 9.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold
+                        )
+                    )
+                }
+            }
+        }
+
+        // ── Live token stream ─────────────────────────────────────────────────
+        if (agentState.status == "running" && streamBuffer.isNotBlank()) {
+            ARIACard {
+                Text(
+                    "THINKING…",
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = ARIAColors.Primary, letterSpacing = 1.sp
+                    )
+                )
+                Spacer(Modifier.height(4.dp))
+                Text(
+                    streamBuffer,
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        fontFamily = FontFamily.Monospace,
+                        color = ARIAColors.OnSurface,
+                        lineHeight = 18.sp
+                    ),
+                    maxLines = 8
+                )
+            }
+        }
+
+        // ── Phase 6/8: Game loop card ─────────────────────────────────────────
+        val gl = gameLoopState
+        if (gl != null && (gl.isActive || agentState.gameMode != "none")) {
+            ARIACard {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            Icons.Default.SportsEsports,
+                            contentDescription = null,
+                            tint = ARIAColors.Accent,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Text(
+                            "GAME MODE — ${gl.gameType.uppercase()}",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = ARIAColors.Accent,
+                                fontWeight = FontWeight.Bold,
+                                letterSpacing = 1.sp
+                            )
+                        )
+                    }
+                    if (gl.isGameOver) {
+                        Text(
+                            "GAME OVER",
+                            style = MaterialTheme.typography.labelSmall.copy(
+                                color = ARIAColors.Error, fontWeight = FontWeight.Bold
+                            )
+                        )
+                    }
+                }
+                Spacer(Modifier.height(10.dp))
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceEvenly
+                ) {
+                    GameStat("Score",   String.format("%.0f", gl.currentScore))
+                    GameStat("Best",    String.format("%.0f", gl.highScore))
+                    GameStat("Episode", "${gl.episodeCount}")
+                    GameStat("Reward",  String.format("%.1f", gl.totalReward))
+                }
+                if (gl.lastAction.isNotBlank()) {
+                    Spacer(Modifier.height(6.dp))
+                    Text(
+                        "Last: ${gl.lastAction}",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = ARIAColors.Muted,
+                            fontFamily = FontFamily.Monospace
+                        )
+                    )
+                }
+            }
+        }
+
+        // Round 23 §183: pending tasks chip when the task queue is non-empty.
+        if (taskQueue.isNotEmpty()) {
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(8.dp))
+                    .background(ARIAColors.Accent.copy(alpha = 0.08f))
+                    .padding(horizontal = 12.dp, vertical = 6.dp),
+                horizontalArrangement = Arrangement.spacedBy(6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Default.Queue, null, tint = ARIAColors.Accent, modifier = Modifier.size(14.dp))
+                Text(
+                    "${taskQueue.size} task${if (taskQueue.size == 1) "" else "s"} pending in queue",
+                    style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Accent, fontWeight = FontWeight.SemiBold, fontSize = 10.sp),
+                    modifier = Modifier.weight(1f),
+                )
+            }
+        }
+
+        // ── System status ─────────────────────────────────────────────────────
+        ARIACard {
+            Text("SYSTEM", style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted))
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                StatusDotRow("Accessibility", agentState.accessibilityActive)
+                StatusDotRow("Screen Cap",    agentState.screenCaptureActive)
+                StatusDotRow("Model",         agentState.modelLoaded)
+            }
+            if (thermalState.level != "safe") {
+                Spacer(Modifier.height(8.dp))
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        Modifier.size(6.dp).clip(CircleShape)
+                            .background(thermalColor(thermalState.level))
+                    )
+                    Text(
+                        "Thermal: ${thermalState.level.uppercase()}",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color = thermalColor(thermalState.level)
+                        )
+                    )
+                }
+            }
+        }
+
+        // ── Session stats ─────────────────────────────────────────────────────
+        if (sessionStats.tasksCompleted + sessionStats.tasksErrored > 0) {
+            SessionStatsCard(
+                stats              = sessionStats,
+                lastTaskDurationMs = lastTaskDurationMs,
+                uptimeSeconds      = uptimeSeconds,
+                onResetSession     = { vm.resetSession() },
+            )
+        }
+
+        // ── Learning stats ────────────────────────────────────────────────────
+        ARIACard {
+            Text("ON-DEVICE LEARNING", style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted))
+            Spacer(Modifier.height(10.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceEvenly
+            ) {
+                LearningStat("LoRA", "v${learningState.loraVersion}")
+                LearningStat("Policy", "v${learningState.policyVersion}")
+                LearningStat("Adam Steps", "${learningState.adamStep}")
+                if (learningState.lastPolicyLoss > 0.0) {
+                    val lossColor = when {
+                        learningState.lastPolicyLoss < 0.05 -> ARIAColors.Success
+                        learningState.lastPolicyLoss < 0.30 -> ARIAColors.Warning
+                        else                                -> ARIAColors.Error
+                    }
+                    LearningStat("Loss", String.format("%.4f", learningState.lastPolicyLoss), valueColor = lossColor)
+                }
+            }
+            if (learningState.untrainedSamples > 0) {
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "${learningState.untrainedSamples} samples pending training",
+                    style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted)
+                )
+            }
+        }
+    }
+}
+
+// ─── Session Stats card ───────────────────────────────────────────────────────
+
+@Composable
+private fun SessionStatsCard(
+    stats: SessionStatsUiState,
+    lastTaskDurationMs: Long = 0L,
+    // Round 22 §165: live uptime seconds for Uptime chip while agent is running.
+    uptimeSeconds: Long = 0L,
+    // Round 22 §166: callback to reset session — shows Reset TextButton when wired.
+    onResetSession: (() -> Unit)? = null,
+) {
+    val lastDurSec = (lastTaskDurationMs / 1_000L).toInt()
+    ARIACard {
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Text(
+                "SESSION STATS",
+                style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted),
+                modifier = Modifier.weight(1f),
+            )
+            // Round 22 §166: Reset session TextButton — visible when there are completed tasks.
+            if (onResetSession != null && (stats.tasksCompleted + stats.tasksErrored) > 0) {
+                TextButton(onClick = onResetSession, contentPadding = PaddingValues(horizontal = 6.dp, vertical = 0.dp)) {
+                    Text("Reset", color = ARIAColors.Muted, style = MaterialTheme.typography.labelSmall)
+                }
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Row(
+            modifier = Modifier.fillMaxWidth(),
+            horizontalArrangement = Arrangement.SpaceEvenly
+        ) {
+            SessionStat("Done",    "${stats.tasksCompleted}")
+            SessionStat("Errors",  "${stats.tasksErrored}")
+            SessionStat("Steps",   "${stats.totalSteps}")
+            SessionStat("Success", "${(stats.successRate * 100).toInt()}%")
+            // Round 16 §98: last task wall-clock duration chip.
+            if (lastDurSec > 0) {
+                val durStr = if (lastDurSec >= 60) "${lastDurSec / 60}m ${lastDurSec % 60}s"
+                             else "${lastDurSec}s"
+                SessionStat("Last Task", durStr)
+            }
+            // Round 18 §119: avg per-step inference latency chip.
+            if (stats.avgStepDurationMs > 0L) {
+                SessionStat("ms/Step", "${stats.avgStepDurationMs}")
+            }
+            // Round 18 §128: inference-timeout count chip — warning tint when > 0.
+            if (stats.inferenceTimeoutCount > 0) {
+                SessionStat("Timeouts", "${stats.inferenceTimeoutCount}", valueColor = ARIAColors.Warning)
+            }
+            // Round 20 §145: chat message count chip.
+            if (stats.chatMessagesCount > 0) {
+                SessionStat("Chat", "${stats.chatMessagesCount}")
+            }
+            // Round 22 §165: live uptime chip while agent is running.
+            if (uptimeSeconds > 0L) {
+                val m = uptimeSeconds / 60L
+                val s = uptimeSeconds % 60L
+                SessionStat("Uptime", if (m > 0L) "${m}m ${s}s" else "${s}s")
+            }
+            // Round 22 §176: loop errors chip — only shown when errors occurred.
+            if (stats.agentLoopErrors > 0) {
+                SessionStat("Loop Err", "${stats.agentLoopErrors}", valueColor = ARIAColors.Error)
+            }
+            // Round 24 §192: total session tokens chip.
+            if (stats.totalSessionTokens > 0L) {
+                val tokenDisplay = if (stats.totalSessionTokens >= 1_000L)
+                    "${stats.totalSessionTokens / 1_000L}K tok" else "${stats.totalSessionTokens} tok"
+                SessionStat("Tokens", tokenDisplay)
+            }
+        }
+        if (stats.tasksCompleted > 0 || stats.inferenceTimeoutCount > 0) {
+            Spacer(Modifier.height(6.dp))
+            val avgDurText = if (stats.avgStepDurationMs > 0L) "  •  ${stats.avgStepDurationMs}ms/step" else ""
+            val timeoutText = if (stats.inferenceTimeoutCount > 0) "  •  ${stats.inferenceTimeoutCount} timeout${if (stats.inferenceTimeoutCount == 1) "" else "s"}" else ""
+            Text(
+                (if (stats.tasksCompleted > 0)
+                    "Avg ${String.format("%.1f", stats.avgStepsPerTask)} steps/task$avgDurText"
+                else "") +
+                timeoutText +
+                "  •  Session ${stats.sessionDurationMinutes} min",
+                style = MaterialTheme.typography.labelSmall.copy(
+                    color = if (stats.inferenceTimeoutCount > 0) ARIAColors.Warning else ARIAColors.Muted
+                )
+            )
+        }
+    }
+}
+
+// Round 18 §128: optional valueColor for warning/error-tinted chips (e.g. timeout count).
+@Composable
+private fun SessionStat(label: String, value: String, valueColor: Color = ARIAColors.OnSurface) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(2.dp)) {
+        Text(value, style = MaterialTheme.typography.bodyMedium.copy(color = valueColor, fontWeight = FontWeight.Bold, fontFamily = FontFamily.Monospace))
+        Text(label, style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted, fontSize = 9.sp))
+    }
+}
+
+// ─── Shared composable helpers (used across screens) ──────────────────────────
+
+@Composable
+fun ARIACard(
+    modifier: Modifier = Modifier,
+    containerColor: Color = ARIAColors.Surface,
+    content: @Composable ColumnScope.() -> Unit,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        elevation = CardDefaults.cardElevation(0.dp)
+    ) {
+        Column(modifier = Modifier.padding(14.dp), content = content)
+    }
+}
+
+@Composable
+fun StatusPill(status: String) {
+    val (bg, fg) = when (status) {
+        "running" -> ARIAColors.Primary.copy(alpha = 0.18f) to ARIAColors.Primary
+        "paused"  -> ARIAColors.Warning.copy(alpha = 0.18f) to ARIAColors.Warning
+        "done"    -> ARIAColors.Success.copy(alpha = 0.18f) to ARIAColors.Success
+        "error"   -> ARIAColors.Error.copy(alpha = 0.18f)   to ARIAColors.Error
+        else      -> ARIAColors.Muted.copy(alpha = 0.14f)   to ARIAColors.Muted
+    }
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        modifier = Modifier
+            .clip(CircleShape)
+            .background(bg)
+            .padding(horizontal = 10.dp, vertical = 4.dp)
+    ) {
+        Box(Modifier.size(6.dp).clip(CircleShape).background(fg))
+        Text(
+            status.uppercase(),
+            style = MaterialTheme.typography.labelMedium.copy(
+                color = fg, fontWeight = FontWeight.Bold, letterSpacing = 1.sp
+            )
+        )
+    }
+}
+
+@Composable
+fun MetricChip(icon: ImageVector, label: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(4.dp)
+    ) {
+        Icon(icon, contentDescription = null, tint = ARIAColors.Muted, modifier = Modifier.size(14.dp))
+        Text(label, style = MaterialTheme.typography.bodySmall.copy(color = ARIAColors.Muted))
+    }
+}
+
+@Composable
+fun StatusIndicator(ok: Boolean, label: String) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(3.dp)
+    ) {
+        Box(
+            Modifier.size(6.dp).clip(CircleShape)
+                .background(if (ok) ARIAColors.Success else ARIAColors.Error)
+        )
+        Text(label, style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted))
+    }
+}
+
+@Composable
+fun StepActivityBar(activity: String, stepNumber: Int) {
+    val steps = listOf("observe", "reason", "act", "store")
+    Row(
+        modifier = Modifier.fillMaxWidth(),
+        horizontalArrangement = Arrangement.SpaceBetween,
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        steps.forEach { step ->
+            val active = step == activity
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Box(
+                    Modifier
+                        .size(width = 48.dp, height = 4.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(if (active) ARIAColors.Primary else ARIAColors.Divider)
+                )
+                Spacer(Modifier.height(3.dp))
+                Text(
+                    step.uppercase(),
+                    style = MaterialTheme.typography.labelSmall.copy(
+                        color = if (active) ARIAColors.Primary else ARIAColors.Muted,
+                        fontSize = 9.sp,
+                        fontWeight = if (active) FontWeight.Bold else FontWeight.Normal
+                    )
+                )
+            }
+        }
+        Text(
+            "#$stepNumber",
+            style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted, fontSize = 9.sp)
+        )
+    }
+}
+
+@Composable
+private fun ThermalBanner(message: String, color: Color, icon: ImageVector) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .background(color.copy(alpha = 0.12f), RoundedCornerShape(8.dp))
+            .padding(10.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(16.dp))
+        Text(message, style = MaterialTheme.typography.bodySmall.copy(color = color))
+    }
+}
+
+@Composable
+private fun StatusDotRow(label: String, ok: Boolean) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Box(
+            Modifier.size(6.dp).clip(CircleShape)
+                .background(if (ok) ARIAColors.Success else ARIAColors.Error)
+        )
+        Text(label, style = MaterialTheme.typography.labelSmall.copy(color = ARIAColors.Muted))
+    }
+}
+
+@Composable
+private fun GameStat(label: String, value: String) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        Text(value, style = MaterialTheme.typography.bodyMedium.copy(
+            color = ARIAColors.Primary, fontWeight = FontWeight.Bold))
+        Text(label, style = MaterialTheme.typography.labelSmall.copy(
+            color = ARIAColors.Muted, fontSize = 10.sp))
+    }
+}
+
+@Composable
+private fun LearningStat(label: String, value: String, valueColor: Color = ARIAColors.Accent) {
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        // Round 21 §155: support optional valueColor for severity tinting (e.g. Loss).
+        Text(value, style = MaterialTheme.typography.bodySmall.copy(
+            color = valueColor, fontWeight = FontWeight.Bold))
+        Text(label, style = MaterialTheme.typography.labelSmall.copy(
+            color = ARIAColors.Muted, fontSize = 10.sp))
+    }
+}
+
+@Composable
+private fun SuggestionBanner(
+    suggestion: SuggestionBannerItem,
+    onAccept: () -> Unit,
+    onDismiss: () -> Unit,
+) {
+    Card(
+        modifier  = Modifier.fillMaxWidth(),
+        shape     = RoundedCornerShape(10.dp),
+        colors    = CardDefaults.cardColors(
+            containerColor = ARIAColors.Success.copy(alpha = 0.10f)
+        ),
+        elevation = CardDefaults.cardElevation(0.dp)
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment     = Alignment.CenterVertically
+            ) {
+                Icon(
+                    Icons.Default.AutoAwesome,
+                    contentDescription = null,
+                    tint     = ARIAColors.Success,
+                    modifier = Modifier.size(18.dp)
+                )
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        "SUGGESTION · seen ${suggestion.repeatCount}×",
+                        style = MaterialTheme.typography.labelSmall.copy(
+                            color      = ARIAColors.Success,
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 0.5.sp
+                        )
+                    )
+                    Text(
+                        suggestion.suggestionText.ifBlank { suggestion.goalText },
+                        style   = MaterialTheme.typography.bodySmall.copy(color = ARIAColors.OnSurface),
+                        maxLines = 2
+                    )
+                }
+                IconButton(
+                    onClick  = onDismiss,
+                    modifier = Modifier.size(28.dp)
+                ) {
+                    Icon(
+                        Icons.Default.Close,
+                        contentDescription = "Dismiss",
+                        tint     = ARIAColors.Muted,
+                        modifier = Modifier.size(16.dp)
+                    )
+                }
+            }
+            Spacer(Modifier.height(8.dp))
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onAccept,
+                    colors  = ButtonDefaults.buttonColors(containerColor = ARIAColors.Success),
+                    shape   = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 14.dp, vertical = 6.dp),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Icon(
+                        Icons.Default.PlayArrow,
+                        contentDescription = null,
+                        modifier = Modifier.size(14.dp)
+                    )
+                    Spacer(Modifier.width(4.dp))
+                    Text(
+                        "Automate it",
+                        style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold)
+                    )
+                }
+                TextButton(
+                    onClick = onDismiss,
+                    contentPadding = PaddingValues(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.height(34.dp)
+                ) {
+                    Text(
+                        "Not now",
+                        style = MaterialTheme.typography.labelMedium.copy(color = ARIAColors.Muted)
+                    )
+                }
+            }
+        }
+    }
+}
+
+fun thermalColor(level: String): Color = when (level) {
+    "light"    -> ARIAColors.Warning
+    "moderate" -> Color(0xFFF97316)
+    "severe"   -> ARIAColors.Error
+    "critical" -> Color(0xFFDC2626)
+    else       -> ARIAColors.Success
+}
