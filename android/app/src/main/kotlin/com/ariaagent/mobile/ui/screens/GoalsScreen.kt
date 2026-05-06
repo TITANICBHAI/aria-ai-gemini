@@ -665,7 +665,7 @@ private fun TemplatesTab(
                     contentPadding = PaddingValues(end = 4.dp),
                 ) {
                     // Round 20 §142: use filteredRecentGoals so searchQuery applies here too.
-                    androidx.compose.foundation.lazy.items(filteredRecentGoals) { recent: RecentGoalItem ->
+                    items(filteredRecentGoals) { recent: RecentGoalItem ->
                         RecentGoalChip(
                             recent = recent,
                             onClick = {
