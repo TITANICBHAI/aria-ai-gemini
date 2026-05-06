@@ -23,6 +23,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.foundation.text.KeyboardOptions
@@ -137,7 +138,7 @@ fun ModulesScreen(
                 val totalLoadedMb = remember(loadedLlms) {
                     loadedLlms.values.filter { it.isLoaded }
                         .sumOf { entry ->
-                            com.ariaagent.mobile.core.model.ModelCatalog.findById(entry.modelId)?.displaySizeMb ?: 0
+                            ModelCatalog.findById(entry.modelId)?.displaySizeMb ?: 0
                         }
                 }
                 if (totalLoadedMb > 0) {
